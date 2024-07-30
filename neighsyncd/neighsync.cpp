@@ -15,6 +15,8 @@
 #include "warm_restart.h"
 #include <algorithm>
 
+#define VLAN_SUB_INTERFACE_SEPARATOR   "."
+
 using namespace std;
 using namespace swss;
 
@@ -24,7 +26,8 @@ NeighSync::NeighSync(RedisPipeline *pipelineAppDB, DBConnector *stateDb, DBConne
     m_cfgInterfaceTable(cfgDb, CFG_INTF_TABLE_NAME),
     m_cfgLagInterfaceTable(cfgDb, CFG_LAG_INTF_TABLE_NAME),
     m_cfgVlanInterfaceTable(cfgDb, CFG_VLAN_INTF_TABLE_NAME),
-    m_cfgPeerSwitchTable(cfgDb, CFG_PEER_SWITCH_TABLE_NAME)
+    m_cfgPeerSwitchTable(cfgDb, CFG_PEER_SWITCH_TABLE_NAME),
+    m_cfgSubInterfaceTable(cfgDb, CFG_VLAN_SUB_INTF_TABLE_NAME)
 {
     m_AppRestartAssist = new AppRestartAssist(pipelineAppDB, "neighsyncd", "swss", DEFAULT_NEIGHSYNC_WARMSTART_TIMER);
     if (m_AppRestartAssist)
@@ -50,6 +53,45 @@ bool NeighSync::isNeighRestoreDone()
     if (value == "true")
     {
         SWSS_LOG_NOTICE("neighbor table restore to kernel is done");
+        return true;
+    }
+    return false;
+}
+
+Table *NeighSync::getInterfaceTable(const std::string &intfName)
+{
+    if (intfName.find(FRONT_PANEL_PORT_PREFIX) != string::npos)
+    {
+        if (intfName.find(VLAN_SUB_INTERFACE_SEPARATOR) != string::npos)
+            return &m_cfgSubInterfaceTable;
+        return &m_cfgInterfaceTable;
+    }
+    else if (intfName.find(PORTCHANNEL_PREFIX) != string::npos)
+    {
+        if (intfName.find(VLAN_SUB_INTERFACE_SEPARATOR) != string::npos)
+            return &m_cfgSubInterfaceTable;
+        return &m_cfgLagInterfaceTable;
+    }
+    else if (intfName.find(VLAN_PREFIX) != string::npos)
+    {
+        return &m_cfgVlanInterfaceTable;
+    }
+    else if (intfName.find(VLAN_SUB_INTERFACE_SEPARATOR) != string::npos)
+    {
+        if ((intfName.find(FRONT_PANEL_PORT_PREFIX) != string::npos) || (intfName.find(PORTCHANNEL_PREFIX) != string::npos))
+            return &m_cfgSubInterfaceTable;
+    }
+    return nullptr;
+}
+
+bool NeighSync::isRouterInterface(const std::string &intfName)
+{
+    vector<FieldValueTuple> values;
+    Table *intfTable_p = nullptr;
+
+    intfTable_p = getInterfaceTable(intfName);
+    if ((intfTable_p != nullptr) && intfTable_p->get(intfName, values))
+    {
         return true;
     }
     return false;
@@ -131,6 +173,13 @@ void NeighSync::onMsg(int nlmsg_type, struct nl_object *obj)
              (state == NUD_INCOMPLETE) || (state == NUD_FAILED))
     {
 	    delete_key = true;
+    }
+
+    /* Ignore neighbor entries on non-router-interface */
+    if (!delete_key && !isRouterInterface(intfName))
+    {
+        SWSS_LOG_INFO("Ignore neighbor %s on non-router-interface %s", ipStr, intfName.c_str());
+        return;
     }
 
     if (use_zero_mac)
